@@ -1,0 +1,52 @@
+Pipeline for analyzing mutation accumulation data in D. discoideum
+
+
+#Make bwa index files
+/usr/local/bwa-0.1.17/bwa index /path/to/genome/reference.fasta
+
+#Index the reference genome
+/usr/local/samtools-1.9/samtools faidx /path/to/genome/reference.fasta
+
+#Create a genome dictionary file 
+module load java (version does not matter as long as it works)
+java -jar /usr/local/picard.jar CreateSequenceDictionary R=/path/to/genome/reference.fasta O=/path/to/genome/reference.dict
+
+#Trim adapter sequences from reads
+module load java
+java -jar /usr/local/Trimmomatic-0.38/latest/trimmomatic.jar PE ../../reads/Sample${i}_R1.fastq ../../reads/Sample${i}_R2.fastq Sample${i}_R1-paired.fastq Sample${i}_R1-unpaired.fastq Sample${i}_R2-paired.fastq Sample${i}_R2-unpaired.fastq ILLUMINACLIP:transposase.fa:2:30:10 MINLEN:40
+
+#Map reads to the reference genome
+/usr/local/bwa-0.1.17/bwa mem /path/to/genome/reference.fasta Sample${i}_R1-paired.fastq Sample${i}_R2-paired.fastq > Sample${i}.sam
+
+#Convert the sam file to the bam file
+/usr/local/samtools-1.9/samtools view -bhS Sample${i}.sam > Sample${i}.bam
+
+#Sort the bam file
+/usr/local/samtools-1.9/samtools sort Sample${i}.bam Sample${i}.sort
+
+#Index the bam file
+/usr/local/samtools-1.9/samtools index Sample${i}.sort.bam
+
+#Mark duplicate reads
+module load java
+java -jar /usr/local/picard.jar MarkDuplicates INPUT=Sample${i}.sort.bam OUTPUT=Sample${i}.sort.dedup.bam METRICS_FILE=Sample${i}.metric
+
+#Index the bam file
+/usr/local/samtools-1.9/samtools index Sample${i}.sort.dedup.bam
+
+#GATK
+module load java
+java -Xmx2g -jar /usr/local/GenomeAnalysisTK.jar -T RealignerTargetCreator -R /path/to/genome/reference.fasta -I Sample${i}.sort.dedup.bam -o Sample${i}.intervals
+java -Xmx2g -jar /usr/local/GenomeAnalysisTK.jar -T IndelRealigner -R /path/to/genome/reference.fasta -I Sample${i}.sort.dedup.bam -targetIntervals Sample${i}.intervals -o Sample${i}.sort.realigned.bam
+java -Xmx2g -jar /usr/local/GenomeAnalysisTK.jar -R /path/to/genome/reference.fasta -T HaplotypeCaller -I Sample${i}.sort.realigned.bam --emitRefConfidence GVCF -variant_index_type LINEAR -variant_index_parameter 128000 -ploidy 1 -o Sample${i}.bwa.raw.snps.indels.g.vcf
+
+#Variant calling 
+java -Xmx2g -jar /usr/local/GenomeAnalysisTK.jar -T CombineGVCFs -R /path/to/genome/reference.fasta --variant Sample1.bwa.raw.snps.indels.g.vcf --variant Sample2.bwa.raw.snps.indels.g.vcf --variant Sample3.bwa.raw.snps.indels.g.vcf -o hc.merge.g.vcf  
+java -Xmx2g -jar /usr/local/GenomeAnalysisTK.jar -T GenotypeGVCFs -R /path/to/genome/reference.fasta --variant hc.merge.g.vcf -o hc.raw.vcf
+java -Xmx2g -jar /usr/local/GenomeAnalysisTK.jar -T SelectVariants -R /path/to/genome/reference.fasta -V hc.raw.vcf -selectType SNP -o hc.snp.vcf
+java -Xmx2g -jar /usr/local/GenomeAnalysisTK.jar -R /path/to/genome/reference.fasta -T VariantFiltration -V hc.snp.vcf --filterExpression "QD < 2.0 || FS > 60.0 || MQ < 40.0 || MQRankSum < -12.5 || ReadPosRankSum < -8.0" --filterName "my_snp_filter" -o hc.filtered_snp.vcf
+java -Xmx2g -jar /usr/local/GenomeAnalysisTK.jar -T SelectVariants -R /path/to/genome/reference.fasta -V hc.raw.vcf -selectType INDEL -o hc.indel.vcf
+java -Xmx2g -jar /usr/local/GenomeAnalysisTK.jar -T VariantFiltration -R /path/to/genome/reference.fasta -V hc.indel.vcf --filterExpression "QD < 2.0 || FS > 200.0 || ReadPosRankSum < -20.0" --filterName "my_indel_filter" -o hc.filtered_indel.vcf
+
+#Functional annotation
+java -Xmx4g -jar /usr/local/snpEff.jar annotated_genome hc.filtered_snp.vcf > snp.ann.vcf
